@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.21;
+import "hardhat/console.sol";
 
 contract TimeLock {
 
@@ -15,7 +16,7 @@ contract TimeLock {
 
     
     address public admin;// 管理员地址
-    uint256 public constant grace_period = 7 days ;// 交易有效期
+    uint256 public constant GRACE_PERIOD = 7 days ;// 交易有效期
     uint256 public delay;// 交易锁定时间
     mapping (bytes32 => bool) public queuedTransactions; // txHash到bool，记录所有在时间锁队列中的交易
 
@@ -34,22 +35,21 @@ contract TimeLock {
         _;
     }
 
-    function changeAdmin(address newAdmin)public onlyTimeLock onlyOwner{
+    function changeAdmin(address newAdmin)public onlyTimeLock{
         admin = newAdmin;
         
         emit NewAdmin(newAdmin);
     }
     //0x000000000000000000000000Ab8483F64d9C6d1EcF9b849Ae677dD3315835cb2
 
-    function getBlockTimestamp()public view returns (uint256){
-        return block.timestamp;
-    }
+  
 
     function getHash(address target,uint value, string memory signature, bytes memory data, uint256 executeTime)public pure returns (bytes32){
         return keccak256(abi.encodePacked(target,value,signature,data,executeTime));
     }
 
-/**
+
+    /**
      * @dev 创建交易并添加到时间锁队列中。
      * @param target: 目标合约地址
      * @param value: 发送eth数额
@@ -59,28 +59,35 @@ contract TimeLock {
      *
      * 要求：executeTime 大于 当前区块链时间戳+delay
      */
-     function queueTransaction(address target, uint256 value, string memory signature, bytes memory data, uint256 executeTime)public onlyOwner returns (bytes32){
+    function queueTransaction(address target, uint256 value, string memory signature, bytes memory data, uint256 executeTime) public onlyOwner returns (bytes32) {
         // 检查：交易执行时间满足锁定时间
-        require(executeTime>=getBlockTimestamp()+delay, "Timelock::queueTransaction: Estimated execution block must satisfy delay.");
-        // 计算交易唯一标识符
-        bytes32 txHash = getHash(target, value, signature, data, executeTime);// 交易唯一标识符
+        require(executeTime >= getBlockTimestamp() + delay, "Timelock::queueTransaction: Estimated execution block must satisfy delay.");
+        // 计算交易的唯一识别符：一堆东西的hash
+        bytes32 txHash = getTxHash(target, value, signature, data, executeTime);
+        // 将交易添加到队列
         queuedTransactions[txHash] = true;
+
         emit QueueTransaction(txHash, target, value, signature, data, executeTime);
         return txHash;
-     }
-       /**
+    }
+
+    /**
      * @dev 取消特定交易。
      *
      * 要求：交易在时间锁队列中
      */
-     function cancelTransaction(address target, uint256 value, string memory signature, bytes memory data, uint256 executeTime)public onlyOwner{
-        bytes32 txHash = getHash(target, value, signature, data, executeTime);// 交易唯一标识符
+    function cancelTransaction(address target, uint256 value, string memory signature, bytes memory data, uint256 executeTime) public onlyOwner{
+        // 计算交易的唯一识别符：一堆东西的hash
+        bytes32 txHash = getTxHash(target, value, signature, data, executeTime);
+        // 检查：交易在时间锁队列中
         require(queuedTransactions[txHash], "Timelock::cancelTransaction: Transaction hasn't been queued.");
+        // 将交易移出队列
         queuedTransactions[txHash] = false;
-        emit CancelTransaction(txHash, target, value, signature, data, executeTime);
-     }
 
-      /**
+        emit CancelTransaction(txHash, target, value, signature, data, executeTime);
+    }
+
+    /**
      * @dev 执行特定交易。
      *
      * 要求：
@@ -88,23 +95,69 @@ contract TimeLock {
      * 2. 达到交易的执行时间
      * 3. 交易没过期
      */
-     function executeTransaction(address target, uint256 value, string memory signature, bytes memory data, uint256 executeTime)public onlyOwner returns (bytes memory){
-        bytes32 txHash = getHash(target, value, signature, data, executeTime);// 交易唯一标识符
-        require(queuedTransactions[txHash], "Timelock::cancelTransaction: Transaction hasn't been queued.");
-        require(getBlockTimestamp()>=executeTime, "Timelock::executeTransaction: Transaction hasn't surpassed time lock.");
-        require(getBlockTimestamp()<=executeTime + grace_period, "Timelock::executeTransaction: Transaction is stale.");
+    function executeTransaction(address target, uint256 value, string memory signature, bytes memory data, uint256 executeTime) public payable onlyOwner returns (bytes memory) {
+        bytes32 txHash = getTxHash(target, value, signature, data, executeTime);
+        // 检查：交易是否在时间锁队列中
+        require(queuedTransactions[txHash], "Timelock::executeTransaction: Transaction hasn't been queued.");
+        // 检查：达到交易的执行时间
+        require(getBlockTimestamp() >= executeTime, "Timelock::executeTransaction: Transaction hasn't surpassed time lock.");
+        // 检查：交易没过期
+       require(getBlockTimestamp() <= executeTime + GRACE_PERIOD, "Timelock::executeTransaction: Transaction is stale.");
+        // 将交易移出队列
         queuedTransactions[txHash] = false;
+        console.log(target);
+        console.log(value);
+        console.log(signature);
+        
+        console.log(executeTime);
+        // 获取call data
         bytes memory callData;
-        if (bytes(signature).length==0){
+        if (bytes(signature).length == 0) {
             callData = data;
-        }else {
+        } else {
             callData = abi.encodePacked(bytes4(keccak256(bytes(signature))), data);
         }
-        (bool succ, bytes memory returnData) = target.call{value:value}(callData);
-         require(succ, "Timelock::executeTransaction: Transaction execution reverted.");
-         emit ExecuteTransaction(txHash, target, value, signature, data, executeTime);
-         return returnData;
-     }
+        // 利用call执行交易
+        (bool success, bytes memory returnData) = target.call{value: value}(callData);
+        require(success, "Timelock::executeTransaction: Transaction execution reverted.");
 
-   
+        emit ExecuteTransaction(txHash, target, value, signature, data, executeTime);
+
+        return returnData;
+    }
+
+    function callData(string memory signature, bytes memory data) public  pure returns(bytes memory returnData){
+         
+        returnData =  abi.encodePacked(bytes4(keccak256(bytes(signature))), data);
+    }
+
+    function targetcall(address target, uint value, bytes memory callData)public {
+         (bool success, bytes memory returnData) = target.call{value: value}(callData);
+        require(success, "Timelock::executeTransaction: Transaction execution reverted.");
+    }
+
+    /**
+     * @dev 获取当前区块链时间戳
+     */
+    function getBlockTimestamp() public view returns (uint) {
+        return block.timestamp;
+    }
+
+    /**
+     * @dev 将一堆东西拼成交易的标识符
+     */
+    function getTxHash(
+        address target,
+        uint value,
+        string memory signature,
+        bytes memory data,
+        uint executeTime
+    ) public pure returns (bytes32) {
+        return keccak256(abi.encode(target, value, signature, data, executeTime));
+    }
+
+    function abiEncode(address add) public pure returns (bytes memory res){
+        res = abi.encode(add);
+    }
+
 }
